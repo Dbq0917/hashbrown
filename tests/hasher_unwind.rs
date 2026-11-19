@@ -65,7 +65,7 @@ type Map = HashMap<Key, u64, PanicBuildHasher>;
 
 /// Fill a map until `len == capacity`.
 ///
-/// With the current toolchain this yields a map with `len == capacity == 224`
+/// With the current toolchain this yields a map at its maximum load factor
 /// when constructed from `with_capacity_and_hasher(128, ...)`.
 fn make_full_map() -> Map {
     PANIC_COUNTER.store(!0, Ordering::SeqCst);
@@ -94,16 +94,18 @@ fn hashmap_reserve_survives_panicking_build_hasher_inner(count: usize) {
     let original_len = map.len();
     assert_eq!(
         (map.len(), map.capacity()),
-        (224, 224),
+        (192, 192),
         "this minimized workload is tuned for the validated std/hashbrown layout"
     );
 
-    for i in 1..114 {
+    let survivors = original_len / 2 - 1;
+    let remove_count = original_len - survivors;
+    for i in 1..=remove_count as u64 {
         assert_eq!(map.remove(&Key(i)), Some(i));
     }
     assert_eq!(
         map.len(),
-        111,
+        survivors,
         "setup should leave the expected tombstone pattern"
     );
 
@@ -148,11 +150,11 @@ fn hashmap_reserve_survives_panicking_build_hasher_inner(count: usize) {
 fn hashmap_reserve_survives_panicking_build_hasher() {
     let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     if cfg!(miri) {
-        for i in [0, 50, 110] {
+        for i in [0, 50, 90] {
             hashmap_reserve_survives_panicking_build_hasher_inner(i);
         }
     } else {
-        for i in 0..111 {
+        for i in 0..95 {
             hashmap_reserve_survives_panicking_build_hasher_inner(i);
         }
     }

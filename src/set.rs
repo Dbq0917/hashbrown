@@ -3040,7 +3040,7 @@ mod test_set {
 
         assert_eq!(
             set.capacity(),
-            224,
+            384,
             "The set must be at or close to capacity to trigger a re hashing"
         );
 

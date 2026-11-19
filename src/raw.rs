@@ -106,41 +106,27 @@ fn capacity_to_buckets(cap: usize, table_layout: TableLayout) -> Option<usize> {
 
     // For small tables we require at least 1 empty bucket so that lookups are
     // guaranteed to terminate if an element doesn't exist in the table.
-    if cap < 15 {
-        // Consider a small TableLayout like { size: 1, ctrl_align: 16 } on a
-        // platform with Group::WIDTH of 16 (like x86_64 with SSE2). For small
-        // bucket sizes, this ends up wasting quite a few bytes just to pad to
-        // the relatively larger ctrl_align:
-        //
-        // | capacity | buckets | bytes allocated | bytes per item |
-        // | -------- | ------- | --------------- | -------------- |
-        // |        3 |       4 |              36 | (Yikes!)  12.0 |
-        // |        7 |       8 |              40 | (Poor)     5.7 |
-        // |       14 |      16 |              48 |            3.4 |
-        // |       28 |      32 |              80 |            3.3 |
-        //
-        // In general, buckets * table_layout.size >= table_layout.ctrl_align
-        // must be true to avoid these edges. This is implemented by adjusting
-        // the minimum capacity upwards for small items. This code only needs
-        // to handle ctrl_align which are less than or equal to Group::WIDTH,
-        // because valid layout sizes are always a multiple of the alignment,
-        // so anything with alignment over the Group::WIDTH won't hit this edge
-        // case.
-
+    //
+    // We also need to ensure that `buckets * table_layout.size >=
+    // table_layout.ctrl_align` for very small element types. Otherwise
+    // allocating a small table would waste most of the allocation on padding.
+    // This code only needs to handle ctrl_align <= Group::WIDTH, because valid
+    // layout sizes are multiples of the alignment, so larger alignments cannot
+    // hit this edge case.
+    if cap <= 12 {
         // This is brittle, e.g. if we ever add 32 byte groups, it will select
         // 3 regardless of the table_layout.size.
         let min_cap = match (Group::WIDTH, table_layout.size) {
-            (16, 0..=1) => 14,
-            (16, 2..=3) | (8, 0..=1) => 7,
+            (16, 0..=1) => 12,
+            (16, 2..=3) | (8, 0..=1) => 6,
             _ => 3,
         };
         let cap = min_cap.max(cap);
-        // We don't bother with a table size of 2 buckets since that can only
-        // hold a single element. Instead, we skip directly to a 4 bucket table
-        // which can hold 3 elements.
-        let buckets = if cap < 4 {
+        // We don't bother with tables of 1 or 2 buckets since they can only
+        // hold zero or one element. Instead, skip directly to a 4 bucket table.
+        let buckets = if cap <= 3 {
             4
-        } else if cap < 8 {
+        } else if cap <= 6 {
             8
         } else {
             16
@@ -149,11 +135,11 @@ fn capacity_to_buckets(cap: usize, table_layout: TableLayout) -> Option<usize> {
         return Some(buckets);
     }
 
-    // Otherwise require 1/8 buckets to be empty (87.5% load)
+    // Otherwise keep at most 3/4 of the buckets full (75% load).
     //
     // Be careful when modifying this, calculate_layout relies on the
     // overflow check here.
-    let adjusted_cap = cap.checked_mul(8)? / 7;
+    let adjusted_cap = cap.checked_mul(4)? / 3;
 
     // Any overflows will have been caught by the checked_mul. Also, any
     // rounding errors from the division above will be cleaned up by
@@ -180,16 +166,16 @@ fn ensure_bucket_bytes_at_least_ctrl_align(table_layout: TableLayout, buckets: u
 /// the maximum load factor into account.
 #[inline]
 fn bucket_mask_to_capacity(bucket_mask: usize) -> usize {
-    if bucket_mask < 8 {
-        // For tables with 1/2/4/8 buckets, we always reserve one empty slot.
+    if bucket_mask < 4 {
+        // For tables with 1/2/4 buckets, we always reserve one empty slot.
         // Keep in mind that the bucket mask is one less than the bucket count.
         bucket_mask
     } else {
         // `bucket_mask` is bounded by the maximum allocation size, so it can
         // never be `usize::MAX` and the `+ 1` below cannot overflow.
         debug_assert!(bucket_mask != usize::MAX);
-        // For larger tables we reserve 12.5% of the slots as empty.
-        ((bucket_mask + 1) / 8) * 7
+        // For larger tables we keep the load factor at or below 75%.
+        ((bucket_mask + 1) / 4) * 3
     }
 }
 
@@ -2043,6 +2029,8 @@ impl RawTableInner {
                 }
             }
 
+            // Only EMPTY terminates the probe. DELETED slots are skipped so
+            // entries placed after a removed element remain reachable.
             if likely(group.match_empty().any_bit_set()) {
                 return None;
             }
@@ -4422,6 +4410,48 @@ mod test_map {
                 assert_eq!(table.find(i, |x| *x == i).map(|b| b.read()), Some(i));
             }
             assert!(table.find(i + 100, |x| *x == i + 100).is_none());
+        }
+    }
+
+    #[test]
+    fn load_factor_is_three_quarters() {
+        let mut table = RawTable::new();
+        let hasher = |i: &usize| *i as u64;
+
+        for i in 0..12 {
+            table.insert(i as u64, i, hasher);
+        }
+        assert_eq!(table.num_buckets(), 16);
+        assert_eq!(table.capacity(), 12);
+
+        table.insert(12, 12, hasher);
+        assert_eq!(table.num_buckets(), 32);
+        assert_eq!(table.capacity(), 24);
+    }
+
+    #[test]
+    fn erase_does_not_break_collision_probe_chain() {
+        let mut table = RawTable::new();
+        let hasher = |_: &usize| 0;
+
+        for i in 0..48 {
+            table.insert(0, i, hasher);
+        }
+
+        unsafe {
+            let bucket = table.find(0, |x| *x == 0).unwrap();
+            let index = table.bucket_index(&bucket);
+            assert_eq!(table.remove(bucket).0, 0);
+
+            // The first probe group is completely full, so clearing this slot
+            // would make lookups for entries in later groups stop too early.
+            assert_eq!(*table.table.ctrl(index), Tag::DELETED);
+        }
+
+        assert!(table.find(0, |x| *x == 0).is_none());
+        for i in 1..48 {
+            let value = unsafe { table.find(0, |x| *x == i).map(|b| b.read()) };
+            assert_eq!(value, Some(i));
         }
     }
 

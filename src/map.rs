@@ -6338,18 +6338,18 @@ mod test_map {
             panic!("isize::MAX should trigger an overflow!");
         }
 
-        if let Err(AllocError { .. }) = empty_bytes.try_reserve(MAX_ISIZE / 5) {
+        if let Err(AllocError { .. }) = empty_bytes.try_reserve(MAX_ISIZE / 6) {
         } else {
             // This may succeed if there is enough free memory. Attempt to
             // allocate a few more hashmaps to ensure the allocation will fail.
             let mut empty_bytes2: HashMap<u8, u8> = HashMap::new();
-            let _ = empty_bytes2.try_reserve(MAX_ISIZE / 5);
+            let _ = empty_bytes2.try_reserve(MAX_ISIZE / 6);
             let mut empty_bytes3: HashMap<u8, u8> = HashMap::new();
-            let _ = empty_bytes3.try_reserve(MAX_ISIZE / 5);
+            let _ = empty_bytes3.try_reserve(MAX_ISIZE / 6);
             let mut empty_bytes4: HashMap<u8, u8> = HashMap::new();
-            if let Err(AllocError { .. }) = empty_bytes4.try_reserve(MAX_ISIZE / 5) {
+            if let Err(AllocError { .. }) = empty_bytes4.try_reserve(MAX_ISIZE / 6) {
             } else {
-                panic!("isize::MAX / 5 should trigger an OOM!");
+                panic!("isize::MAX / 6 should trigger an OOM!");
             }
         }
     }

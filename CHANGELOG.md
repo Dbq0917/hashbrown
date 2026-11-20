@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `HashMap::shrink_to`, `HashMap::shrink_to_fit`, `HashSet::shrink_to`,
+  `HashSet::shrink_to_fit`, `HashTable::shrink_to` and
+  `HashTable::shrink_to_fit` now return a `bool` indicating whether the
+  table was actually shrunk, so that a shrink request that had no effect is
+  observable by the caller.
+
 ## [0.17.1](https://github.com/rust-lang/hashbrown/compare/v0.17.0...v0.17.1) - 2026-04-20
 
 ### Added

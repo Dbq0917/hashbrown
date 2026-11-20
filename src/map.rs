@@ -1137,6 +1137,12 @@ where
     /// down as much as possible while maintaining the internal rules
     /// and possibly leaving some space in accordance with the resize policy.
     ///
+    /// Returns `true` if the map was actually shrunk and its excess capacity
+    /// was released. Returns `false` if the current capacity was already as
+    /// small as the resize policy allows and the map was left untouched, so
+    /// that callers can observe that the shrink request had no effect (and,
+    /// for example, retry it at a later point).
+    ///
     /// # Examples
     ///
     /// ```
@@ -1146,21 +1152,27 @@ where
     /// map.insert(1, 2);
     /// map.insert(3, 4);
     /// assert!(map.capacity() >= 100);
-    /// map.shrink_to_fit();
+    /// assert!(map.shrink_to_fit());
     /// assert!(map.capacity() >= 2);
+    /// // The capacity is already minimal, so shrinking again has no effect.
+    /// assert!(!map.shrink_to_fit());
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn shrink_to_fit(&mut self) {
+    pub fn shrink_to_fit(&mut self) -> bool {
         self.table
-            .shrink_to(0, make_hasher::<_, V, S>(&self.hash_builder));
+            .shrink_to(0, make_hasher::<_, V, S>(&self.hash_builder))
     }
 
     /// Shrinks the capacity of the map with a lower limit. It will drop
     /// down no lower than the supplied limit while maintaining the internal rules
     /// and possibly leaving some space in accordance with the resize policy.
     ///
-    /// This function does nothing if the current capacity is smaller than the
-    /// supplied minimum capacity.
+    /// Returns `true` if the map was actually shrunk and its excess capacity
+    /// was released. Returns `false` if the map was left untouched, which
+    /// happens when the current capacity is already smaller than the supplied
+    /// minimum capacity or already matches the resize policy. This makes it
+    /// possible to observe that the shrink request had no effect (and, for
+    /// example, retry it at a later point).
     ///
     /// # Examples
     ///
@@ -1171,17 +1183,18 @@ where
     /// map.insert(1, 2);
     /// map.insert(3, 4);
     /// assert!(map.capacity() >= 100);
-    /// map.shrink_to(10);
+    /// assert!(map.shrink_to(10));
     /// assert!(map.capacity() >= 10);
-    /// map.shrink_to(0);
+    /// assert!(map.shrink_to(0));
     /// assert!(map.capacity() >= 2);
-    /// map.shrink_to(10);
+    /// // The capacity is already below the limit, so nothing happens.
+    /// assert!(!map.shrink_to(10));
     /// assert!(map.capacity() >= 2);
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn shrink_to(&mut self, min_capacity: usize) {
+    pub fn shrink_to(&mut self, min_capacity: usize) -> bool {
         self.table
-            .shrink_to(min_capacity, make_hasher::<_, V, S>(&self.hash_builder));
+            .shrink_to(min_capacity, make_hasher::<_, V, S>(&self.hash_builder))
     }
 
     /// Gets the given key's corresponding entry in the map for in-place manipulation.
@@ -5739,21 +5752,75 @@ mod test_map {
         for i in 100..(128 + 256) {
             assert_eq!(m.remove(&i), Some(i));
         }
-        m.shrink_to_fit();
+        // The map holds far less than the reserved capacity, so the shrink
+        // must take effect and report it.
+        assert!(m.shrink_to_fit());
+        let shrunk_cap = m.capacity();
+        assert!(shrunk_cap < usable_cap);
 
         assert_eq!(m.len(), 100);
         assert!(!m.is_empty());
         assert!(m.capacity() >= m.len());
 
+        // Shrinking again has no effect, and this is now observable.
+        assert!(!m.shrink_to_fit());
+        assert_eq!(m.capacity(), shrunk_cap);
+
         for i in 0..100 {
             assert_eq!(m.remove(&i), Some(i));
         }
-        m.shrink_to_fit();
+        assert!(m.shrink_to_fit());
         m.insert(0, 0);
 
         assert_eq!(m.len(), 1);
         assert!(m.capacity() >= m.len());
         assert_eq!(m.remove(&0), Some(0));
+    }
+
+    #[test]
+    fn test_batch_write_then_shrink() {
+        // Batch workload: reserve up front, write the whole batch, then
+        // shrink once after the batch is done.
+        let mut m = HashMap::new();
+        m.reserve(512);
+        let reserved_cap = m.capacity();
+        assert!(reserved_cap >= 512);
+
+        // The batch write must not reallocate: the reserved space covers it.
+        for i in 0..512 {
+            m.insert(i, i);
+            assert_eq!(m.capacity(), reserved_cap);
+        }
+
+        // After the batch, remove most of the elements and shrink once.
+        for i in 32..512 {
+            assert_eq!(m.remove(&i), Some(i));
+        }
+        assert!(m.shrink_to_fit());
+
+        // The excess capacity is actually released.
+        let shrunk_cap = m.capacity();
+        assert!(shrunk_cap < reserved_cap);
+        assert!(shrunk_cap >= m.len());
+
+        // A repeated shrink is a no-op and reports it.
+        assert!(!m.shrink_to_fit());
+        assert_eq!(m.capacity(), shrunk_cap);
+
+        // Every subsequent batch follows the same pattern: write, then
+        // shrink once, and the reported result matches the actual capacity.
+        for _ in 0..4 {
+            for i in 0..256 {
+                m.insert(i, i);
+            }
+            for i in 64..256 {
+                assert_eq!(m.remove(&i), Some(i));
+            }
+            let before = m.capacity();
+            let shrunk = m.shrink_to_fit();
+            assert_eq!(shrunk, m.capacity() < before);
+            assert!(m.capacity() >= m.len());
+        }
     }
 
     #[test]

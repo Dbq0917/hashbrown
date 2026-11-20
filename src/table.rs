@@ -744,6 +744,12 @@ where
     /// `hasher` is called if entries need to be moved or copied to a new table.
     /// This must return the same hash value that each entry was inserted with.
     ///
+    /// Returns `true` if the table was actually shrunk and its excess capacity
+    /// was released. Returns `false` if the current capacity was already as
+    /// small as the resize policy allows and the table was left untouched, so
+    /// that callers can observe that the shrink request had no effect (and,
+    /// for example, retry it at a later point).
+    ///
     /// # Examples
     ///
     /// ```
@@ -758,16 +764,18 @@ where
     /// table.insert_unique(hasher(&1), 1, hasher);
     /// table.insert_unique(hasher(&2), 2, hasher);
     /// assert!(table.capacity() >= 100);
-    /// table.shrink_to_fit(hasher);
+    /// assert!(table.shrink_to_fit(hasher));
     /// assert!(table.capacity() >= 2);
+    /// // The capacity is already minimal, so shrinking again has no effect.
+    /// assert!(!table.shrink_to_fit(hasher));
     /// # }
     /// # fn main() {
     /// #     #[cfg(feature = "nightly")]
     /// #     test()
     /// # }
     /// ```
-    pub fn shrink_to_fit(&mut self, hasher: impl Fn(&T) -> u64) {
-        self.raw.shrink_to(self.len(), hasher);
+    pub fn shrink_to_fit(&mut self, hasher: impl Fn(&T) -> u64) -> bool {
+        self.raw.shrink_to(self.len(), hasher)
     }
 
     /// Shrinks the capacity of the table with a lower limit. It will drop
@@ -777,8 +785,12 @@ where
     /// `hasher` is called if entries need to be moved or copied to a new table.
     /// This must return the same hash value that each entry was inserted with.
     ///
-    /// Panics if the current capacity is smaller than the supplied
-    /// minimum capacity.
+    /// Returns `true` if the table was actually shrunk and its excess capacity
+    /// was released. Returns `false` if the table was left untouched, which
+    /// happens when the current capacity is already smaller than the supplied
+    /// minimum capacity or already matches the resize policy. This makes it
+    /// possible to observe that the shrink request had no effect (and, for
+    /// example, retry it at a later point).
     ///
     /// # Examples
     ///
@@ -794,18 +806,20 @@ where
     /// table.insert_unique(hasher(&1), 1, hasher);
     /// table.insert_unique(hasher(&2), 2, hasher);
     /// assert!(table.capacity() >= 100);
-    /// table.shrink_to(10, hasher);
+    /// assert!(table.shrink_to(10, hasher));
     /// assert!(table.capacity() >= 10);
-    /// table.shrink_to(0, hasher);
+    /// assert!(table.shrink_to(0, hasher));
     /// assert!(table.capacity() >= 2);
+    /// // The capacity is already below the limit, so nothing happens.
+    /// assert!(!table.shrink_to(10, hasher));
     /// # }
     /// # fn main() {
     /// #     #[cfg(feature = "nightly")]
     /// #     test()
     /// # }
     /// ```
-    pub fn shrink_to(&mut self, min_capacity: usize, hasher: impl Fn(&T) -> u64) {
-        self.raw.shrink_to(min_capacity, hasher);
+    pub fn shrink_to(&mut self, min_capacity: usize, hasher: impl Fn(&T) -> u64) -> bool {
+        self.raw.shrink_to(min_capacity, hasher)
     }
 
     /// Reserves capacity for at least `additional` more elements to be inserted

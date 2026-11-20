@@ -849,12 +849,23 @@ impl<T, A: Allocator> RawTable<T, A> {
     }
 
     /// Shrinks the table to fit `max(self.len(), min_size)` elements.
+    ///
+    /// Returns `true` if the table was actually shrunk, i.e. its backing
+    /// storage was freed or replaced with a smaller one. Returns `false` if
+    /// the current capacity was already small enough and the table was left
+    /// untouched, so that callers can observe that the shrink request had no
+    /// effect (and, for example, retry it at a later point).
     #[cfg_attr(feature = "inline-more", inline)]
-    pub(crate) fn shrink_to(&mut self, min_size: usize, hasher: impl Fn(&T) -> u64) {
+    pub(crate) fn shrink_to(&mut self, min_size: usize, hasher: impl Fn(&T) -> u64) -> bool {
         // Calculate the minimal number of elements that we need to reserve
         // space for.
         let min_size = usize::max(self.table.items, min_size);
         if min_size == 0 {
+            if self.num_buckets() == 0 {
+                // The table has no backing storage, so there is nothing
+                // to release.
+                return false;
+            }
             let mut old_inner = mem::replace(&mut self.table, RawTableInner::NEW);
             unsafe {
                 // SAFETY:
@@ -865,7 +876,7 @@ impl<T, A: Allocator> RawTable<T, A> {
                 //    because we have replaced the inner table with a new one.
                 old_inner.drop_inner_table::<T, _>(&self.alloc, Self::TABLE_LAYOUT);
             }
-            return;
+            return true;
         }
 
         // Calculate the number of buckets that we need for this number of
@@ -873,7 +884,7 @@ impl<T, A: Allocator> RawTable<T, A> {
         // count must be larger than what we have right and nothing needs to be
         // done.
         let Some(min_buckets) = capacity_to_buckets(min_size, Self::TABLE_LAYOUT) else {
-            return;
+            return false;
         };
 
         // If we have more buckets than we need, shrink the table.
@@ -903,7 +914,12 @@ impl<T, A: Allocator> RawTable<T, A> {
                 // because `fallibility == Fallibility::Infallible.
                 unsafe { result.unwrap_unchecked() };
             }
+            return true;
         }
+
+        // The current capacity is already small enough; the shrink request
+        // had no effect.
+        false
     }
 
     /// Ensures that at least `additional` items can be inserted into the table

@@ -665,6 +665,12 @@ where
     /// down as much as possible while maintaining the internal rules
     /// and possibly leaving some space in accordance with the resize policy.
     ///
+    /// Returns `true` if the set was actually shrunk and its excess capacity
+    /// was released. Returns `false` if the current capacity was already as
+    /// small as the resize policy allows and the set was left untouched, so
+    /// that callers can observe that the shrink request had no effect (and,
+    /// for example, retry it at a later point).
+    ///
     /// # Examples
     ///
     /// ```
@@ -674,20 +680,26 @@ where
     /// set.insert(1);
     /// set.insert(2);
     /// assert!(set.capacity() >= 100);
-    /// set.shrink_to_fit();
+    /// assert!(set.shrink_to_fit());
     /// assert!(set.capacity() >= 2);
+    /// // The capacity is already minimal, so shrinking again has no effect.
+    /// assert!(!set.shrink_to_fit());
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn shrink_to_fit(&mut self) {
-        self.map.shrink_to_fit();
+    pub fn shrink_to_fit(&mut self) -> bool {
+        self.map.shrink_to_fit()
     }
 
     /// Shrinks the capacity of the set with a lower limit. It will drop
     /// down no lower than the supplied limit while maintaining the internal rules
     /// and possibly leaving some space in accordance with the resize policy.
     ///
-    /// Panics if the current capacity is smaller than the supplied
-    /// minimum capacity.
+    /// Returns `true` if the set was actually shrunk and its excess capacity
+    /// was released. Returns `false` if the set was left untouched, which
+    /// happens when the current capacity is already smaller than the supplied
+    /// minimum capacity or already matches the resize policy. This makes it
+    /// possible to observe that the shrink request had no effect (and, for
+    /// example, retry it at a later point).
     ///
     /// # Examples
     ///
@@ -698,14 +710,16 @@ where
     /// set.insert(1);
     /// set.insert(2);
     /// assert!(set.capacity() >= 100);
-    /// set.shrink_to(10);
+    /// assert!(set.shrink_to(10));
     /// assert!(set.capacity() >= 10);
-    /// set.shrink_to(0);
+    /// assert!(set.shrink_to(0));
     /// assert!(set.capacity() >= 2);
+    /// // The capacity is already below the limit, so nothing happens.
+    /// assert!(!set.shrink_to(10));
     /// ```
     #[cfg_attr(feature = "inline-more", inline)]
-    pub fn shrink_to(&mut self, min_capacity: usize) {
-        self.map.shrink_to(min_capacity);
+    pub fn shrink_to(&mut self, min_capacity: usize) -> bool {
+        self.map.shrink_to(min_capacity)
     }
 
     /// Visits the values representing the difference,

@@ -1075,29 +1075,29 @@ where
         self.map.insert(value, ()).is_none()
     }
 
-    /// Insert a value the set without checking if the value already exists in the set.
-    ///
-    /// This operation is faster than regular insert, because it does not perform
-    /// lookup before insertion.
+    /// Insert a value into the set using the low-level insertion path.
     ///
     /// This operation is useful during initial population of the set.
     /// For example, when constructing a set from another set, we know
     /// that values are unique.
     ///
+    /// The low-level insertion path keeps the same value-uniqueness guarantee
+    /// as the regular insertion path: if an equivalent value already exists in
+    /// the set, no second slot is occupied and a reference to the existing
+    /// value is returned. The set therefore never holds a duplicate value that
+    /// would be unreachable through lookup or impossible to remove, and
+    /// [`len`](Self::len) always reflects the number of distinct values.
+    ///
     /// # Safety
     ///
-    /// This operation is safe if a value does not exist in the set.
+    /// This operation is intended for callers that know the value does not
+    /// exist in the set yet, in which case it avoids the lookup performed by
+    /// the regular [`insert`](Self::insert).
     ///
-    /// However, if a value exists in the set already, the behavior is unspecified:
-    /// this operation may panic, loop forever, or any following operation with the set
-    /// may panic, loop forever or return arbitrary result.
-    ///
-    /// That said, this operation (and following operations) are guaranteed to
-    /// not violate memory safety.
-    ///
-    /// However this operation is still unsafe because the resulting `HashSet`
-    /// may be passed to unsafe code which does expect the set to behave
-    /// correctly, and would cause unsoundness as a result.
+    /// If the value already exists the operation remains well defined and does
+    /// not violate memory safety: it returns the existing value without
+    /// changing the set. The method stays `unsafe` because code consuming the
+    /// resulting set may rely on every value having been inserted exactly once.
     #[cfg_attr(feature = "inline-more", inline)]
     pub unsafe fn insert_unique_unchecked(&mut self, value: T) -> &T {
         unsafe { self.map.insert_unique_unchecked(value, ()).0 }

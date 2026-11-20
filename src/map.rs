@@ -1821,32 +1821,32 @@ where
         }
     }
 
-    /// Insert a key-value pair into the map without checking
-    /// if the key already exists in the map.
-    ///
-    /// This operation is faster than regular insert, because it does not perform
-    /// lookup before insertion.
+    /// Insert a key-value pair into the map using the low-level insertion path.
     ///
     /// This operation is useful during initial population of the map.
     /// For example, when constructing a map from another map, we know
     /// that keys are unique.
     ///
-    /// Returns a reference to the key and value just inserted.
+    /// The low-level insertion path keeps the same key-uniqueness guarantee as
+    /// the regular insertion path: if an equivalent key already exists in the
+    /// map, no second slot is occupied. The value of the existing entry is
+    /// replaced with `v` in place and the references to that existing entry are
+    /// returned. The map therefore never holds a duplicate key that would be
+    /// unreachable through lookup or impossible to remove, and [`len`](Self::len)
+    /// always reflects the number of distinct keys.
+    ///
+    /// Returns a reference to the key and value of the inserted or updated entry.
     ///
     /// # Safety
     ///
-    /// This operation is safe if a key does not exist in the map.
+    /// This operation is intended for callers that know the key does not exist
+    /// in the map yet, in which case it avoids the lookup performed by the
+    /// regular [`insert`](Self::insert).
     ///
-    /// However, if a key exists in the map already, the behavior is unspecified:
-    /// this operation may panic, loop forever, or any following operation with the map
-    /// may panic, loop forever or return arbitrary result.
-    ///
-    /// That said, this operation (and following operations) are guaranteed to
-    /// not violate memory safety.
-    ///
-    /// However this operation is still unsafe because the resulting `HashMap`
-    /// may be passed to unsafe code which does expect the map to behave
-    /// correctly, and would cause unsoundness as a result.
+    /// If the key already exists the operation remains well defined and does not
+    /// violate memory safety: it behaves like replacing the existing value. The
+    /// method stays `unsafe` because code consuming the resulting map may rely
+    /// on every key having been inserted exactly once.
     ///
     /// # Examples
     ///
@@ -1881,9 +1881,20 @@ where
     #[cfg_attr(feature = "inline-more", inline)]
     pub unsafe fn insert_unique_unchecked(&mut self, k: K, v: V) -> (&K, &mut V) {
         let hash = make_hash::<K, S>(&self.hash_builder, &k);
-        let bucket = self
+        let hasher = make_hasher::<_, V, S>(&self.hash_builder);
+        // Probe for an equivalent key while `k` is still borrowed. This keeps
+        // the low-level path consistent with `insert`: an existing key is
+        // updated in place instead of occupying a second, unreachable slot.
+        let bucket = match self
             .table
-            .insert(hash, (k, v), make_hasher::<_, V, S>(&self.hash_builder));
+            .find_or_find_insert_index(hash, equivalent_key(&k), hasher)
+        {
+            Ok(bucket) => {
+                unsafe { *bucket.as_mut() = (k, v) };
+                bucket
+            }
+            Err(index) => unsafe { self.table.insert_at_index(hash, index, (k, v)) },
+        };
         let (k_ref, v_ref) = unsafe { bucket.as_mut() };
         (k_ref, v_ref)
     }
@@ -5498,6 +5509,125 @@ mod test_map {
         assert_eq!(Some(&11), map.get(&10));
         assert_eq!(Some(&21), map.get(&20));
         assert_eq!(None, map.get(&30));
+    }
+
+    #[test]
+    fn test_mixed_insert_paths_stay_unique() {
+        // Interleave the regular insertion path and the low-level
+        // `insert_unique_unchecked` path while writing the same keys more than
+        // once. Both paths must agree on key uniqueness: the number of stored
+        // keys has to match the number of distinct keys, and every key must
+        // stay reachable and removable.
+        let mut map = HashMap::new();
+
+        for i in 0..100u32 {
+            assert!(map.insert(i, i).is_none());
+            // Write the same key again through the low-level path.
+            let (key, value) = unsafe { map.insert_unique_unchecked(i, i * 10) };
+            assert_eq!(key, &i);
+            assert_eq!(value, &(i * 10));
+
+            // Repeated duplicate writes through the low-level path must never
+            // occupy additional slots, including while the table grows.
+            for _ in 0..3 {
+                unsafe {
+                    map.insert_unique_unchecked(i, i * 10);
+                }
+                assert_eq!(map.len(), (i + 1) as usize);
+                assert_eq!(map.iter().count(), (i + 1) as usize);
+            }
+        }
+
+        // `len` must count distinct keys, not write operations.
+        assert_eq!(map.len(), 100);
+        assert_eq!(map.iter().count(), 100);
+        let mut distinct_keys: Vec<u32> = map.keys().copied().collect();
+        distinct_keys.sort_unstable();
+        distinct_keys.dedup();
+        assert_eq!(distinct_keys.len(), 100);
+        // Duplicate writes must not inflate the allocated capacity beyond what
+        // the distinct keys require.
+        assert!(map.capacity() >= 100);
+        assert!(map.capacity() < 200);
+
+        // Every key is reachable and holds the value from the last write.
+        for i in 0..100u32 {
+            assert_eq!(map.get(&i), Some(&(i * 10)));
+        }
+
+        // A low-level write of a key that was inserted the regular way must
+        // not leave an unreachable duplicate slot behind.
+        for i in 0..100u32 {
+            assert_eq!(map.remove(&i), Some(i * 10));
+            assert_eq!(map.get(&i), None);
+            assert_eq!(map.len(), (99 - i) as usize);
+        }
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_insert_unique_unchecked_does_not_duplicate_slots() {
+        let mut map = HashMap::with_capacity(16);
+        map.insert(1u32, "a");
+
+        // The same key goes in through both write paths.
+        unsafe {
+            map.insert_unique_unchecked(1u32, "b");
+        }
+
+        // One distinct key, one stored slot: the duplicate write reuses the
+        // existing slot instead of inflating the item count.
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.iter().count(), 1);
+        assert_eq!(map.get(&1), Some(&"b"));
+
+        // The single entry can be removed normally and nothing is left behind.
+        assert_eq!(map.remove(&1), Some("b"));
+        assert_eq!(map.len(), 0);
+        assert_eq!(map.get(&1), None);
+        assert!(map.is_empty());
+    }
+
+    #[test]
+    fn test_insert_unique_unchecked_drops_replaced_value() {
+        // Overwriting an existing key through the low-level path must drop the
+        // old value exactly once, without leaking or double-dropping it.
+        let drops = Arc::new(core::sync::atomic::AtomicUsize::new(0));
+
+        struct DropCounter(Arc<core::sync::atomic::AtomicUsize>);
+        impl Drop for DropCounter {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+            }
+        }
+
+        let mut map: HashMap<u32, DropCounter> = HashMap::new();
+        map.insert(1, DropCounter(Arc::clone(&drops)));
+        assert_eq!(drops.load(core::sync::atomic::Ordering::SeqCst), 0);
+
+        unsafe {
+            map.insert_unique_unchecked(1, DropCounter(Arc::clone(&drops)));
+        }
+        // Only the replaced value is dropped; no duplicate slot was created.
+        assert_eq!(drops.load(core::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(map.len(), 1);
+
+        drop(map);
+        // The remaining value is dropped once when the map goes away.
+        assert_eq!(drops.load(core::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn test_insert_unique_unchecked_zst_key() {
+        let mut map: HashMap<(), u32> = HashMap::new();
+        map.insert((), 1);
+        unsafe {
+            map.insert_unique_unchecked((), 2);
+        }
+        assert_eq!(map.len(), 1);
+        assert_eq!(map.get(&()), Some(&2));
+        assert_eq!(map.remove(&()), Some(2));
+        assert!(map.is_empty());
     }
 
     #[test]

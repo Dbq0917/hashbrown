@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `HashMap::insert_unique_unchecked` and `HashSet::insert_unique_unchecked`
+  now keep the same key-uniqueness guarantee as the regular insertion path.
+  When an equivalent key already exists, the existing entry is updated in
+  place instead of occupying a second, unreachable slot that inflated `len`
+  and could not be removed by key. The regular insertion path is unchanged.
+
 ## [0.17.1](https://github.com/rust-lang/hashbrown/compare/v0.17.0...v0.17.1) - 2026-04-20
 
 ### Added
